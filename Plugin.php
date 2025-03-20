@@ -20,7 +20,7 @@ if (!defined('__TYPECHO_ROOT_DIR__')) {
  * 
  * @package ThemeDemo
  * @author jkjoy
- * @version 1.0.4
+ * @version 1.0.5
  * @link https://github.com/jkjoy/ThemeDemoForTypecho
  */
 class Plugin implements PluginInterface
@@ -30,7 +30,8 @@ class Plugin implements PluginInterface
      */
     public static function activate()
     {
-        \Typecho\Plugin::factory('index.php')->begin = [__CLASS__, 'processTheme'];
+        // 全局监听请求，支持所有页面
+        \Typecho\Plugin::factory('Widget_Archive')->beforeRender = [__CLASS__, 'processTheme'];
         
         self::log('activate', 'Plugin activated by ' . self::getCurrentUser());
         return _t('插件已经激活，现在可以通过 ?theme=主题目录名 来预览主题');
@@ -77,7 +78,7 @@ class Plugin implements PluginInterface
     /**
      * 处理主题预览请求
      */
-    public static function processTheme()
+    public static function processTheme($archive)
     {
         try {
             $request = new HttpRequest();
