@@ -3,155 +3,161 @@
 namespace TypechoPlugin\ThemeDemo;
 
 use Typecho\Plugin\PluginInterface;
+use Typecho\Request as HttpRequest;
 use Typecho\Widget\Helper\Form;
 use Widget\Options;
 use Widget\User;
-use Typecho\Request as HttpRequest;
-use Typecho\Widget;
-use Typecho\Router;
-use Typecho\Db;
 
 if (!defined('__TYPECHO_ROOT_DIR__')) {
     exit;
 }
 
 /**
- * Typecho 主题预览插件
- * 
+ * Typecho theme preview plugin.
+ *
  * @package ThemeDemo
  * @author jkjoy
- * @version 1.0.5
+ * @version 1.0.6
  * @link https://github.com/jkjoy/ThemeDemoForTypecho
  */
 class Plugin implements PluginInterface
 {
-    /**
-     * 激活插件
-     */
+    private const PREVIEW_COOKIE = 'themedemo_preview_theme';
+    private const PREVIEW_CLEAR_KEYWORD = 'clear';
+    private const PREVIEW_COOKIE_TTL = 2592000;
+
     public static function activate()
     {
-        // 全局监听请求，支持所有页面
         \Typecho\Plugin::factory('Widget_Archive')->beforeRender = [__CLASS__, 'processTheme'];
-        
         self::log('activate', 'Plugin activated by ' . self::getCurrentUser());
-        return _t('插件已经激活，现在可以通过 ?theme=主题目录名 来预览主题');
+
+        return _t('Plugin activated. Use ?theme=theme_dir to preview, ?theme=clear to exit preview.');
     }
 
-    /**
-     * 禁用插件
-     */
     public static function deactivate()
     {
         self::log('deactivate', 'Plugin deactivated by ' . self::getCurrentUser());
-        return _t('插件已被禁用');
+        return _t('Plugin deactivated');
     }
 
-    /**
-     * 获取插件配置面板
-     */
     public static function config(Form $form)
     {
         $form->addInput(new \Typecho\Widget\Helper\Form\Element\Checkbox(
             'allowPreview',
-            ['visitors' => _t('允许访客预览主题')],
+            ['visitors' => _t('Allow visitors to preview theme')],
             [],
-            _t('预览权限'),
-            _t('默认只有管理员可以预览主题')
+            _t('Preview permission'),
+            _t('By default, only logged-in users can preview themes')
         ));
 
         $form->addInput(new \Typecho\Widget\Helper\Form\Element\Checkbox(
             'debugMode',
-            ['enable' => _t('启用调试模式')],
+            ['enable' => _t('Enable debug mode')],
             [],
-            _t('调试模式'),
-            _t('启用后将输出详细的调试信息到日志文件')
+            _t('Debug mode'),
+            _t('When enabled, detailed debug info is written to log file')
         ));
     }
 
-    /**
-     * 个人用户的配置面板
-     */
     public static function personalConfig(Form $form)
     {
     }
 
-    /**
-     * 处理主题预览请求
-     */
     public static function processTheme($archive)
     {
         try {
             $request = new HttpRequest();
-            $themeName = trim($request->get('theme', ''));
-            
-            if (empty($themeName)) {
+            $requestTheme = trim((string) $request->get('theme', ''));
+            $themeSource = 'request';
+
+            if ($requestTheme === self::PREVIEW_CLEAR_KEYWORD) {
+                self::clearPreviewCookie();
+                self::log('info', 'Preview theme cleared by ' . self::getCurrentUser());
                 return;
             }
 
-            // 获取用户和选项
+            $themeName = $requestTheme;
+            if ($themeName === '') {
+                $themeName = self::getPreviewThemeFromCookie();
+                $themeSource = 'cookie';
+            }
+
+            if ($themeName === '') {
+                return;
+            }
+
             $user = User::alloc();
             $options = Options::alloc();
-            
-            // 调试用户状态
+
             self::debug('User status', [
                 'hasLogin' => $user->hasLogin(),
                 'uid' => $user->uid,
-                'name' => $user->screenName
+                'name' => $user->screenName,
+                'themeSource' => $themeSource,
             ]);
 
-            // 检查权限
             $allowVisitors = false;
             try {
                 $pluginOptions = $options->plugin('ThemeDemo');
-                $allowVisitors = !empty($pluginOptions->allowPreview) && 
-                               in_array('visitors', $pluginOptions->allowPreview);
+                $allowPreview = $pluginOptions->allowPreview;
+                $allowVisitors = is_array($allowPreview) && in_array('visitors', $allowPreview, true);
             } catch (\Exception $e) {
                 self::log('warning', 'Failed to get plugin options: ' . $e->getMessage());
             }
 
-            // 权限检查
             if (!$user->hasLogin() && !$allowVisitors) {
-                self::log('access', sprintf('Access denied for user: %s', 
-                    $user->hasLogin() ? $user->screenName : 'visitor'));
+                self::log('access', sprintf(
+                    'Access denied for user: %s',
+                    $user->hasLogin() ? $user->screenName : 'visitor'
+                ));
+
+                if ($themeSource === 'cookie') {
+                    self::clearPreviewCookie();
+                }
                 return;
             }
 
-            self::debug('Access granted', [
-                'user' => $user->screenName,
-                'isAdmin' => $user->hasLogin(),
-                'allowVisitors' => $allowVisitors
-            ]);
-
-            // 检查主题是否存在
-            if (!self::check($themeName)) {
+            if (!self::checkTheme($themeName)) {
                 self::log('error', "Theme not found or invalid: {$themeName}");
+                if ($themeSource === 'cookie') {
+                    self::clearPreviewCookie();
+                }
                 return;
             }
 
-            // 保存当前主题设置
-            $currentTheme = $options->theme;
+            if ($themeSource === 'request') {
+                self::setPreviewCookie($themeName);
+            }
+
+            $currentTheme = (string) $options->theme;
+            if ($currentTheme === $themeName) {
+                self::debug('Theme already active', [
+                    'theme' => $themeName,
+                    'source' => $themeSource,
+                ]);
+                return;
+            }
+
             $currentConfig = [];
             $currentRowName = 'theme:' . $currentTheme;
-            
             if ($options->__isSet($currentRowName)) {
-                $currentConfig = @unserialize($options->$currentRowName);
-                if ($currentConfig === false) {
-                    $currentConfig = [];
+                $currentConfigRaw = $options->$currentRowName;
+                $parsedConfig = @unserialize($currentConfigRaw);
+                if (is_array($parsedConfig)) {
+                    $currentConfig = $parsedConfig;
                 }
             }
 
-            // 设置新主题
             $options->__set('theme', $themeName);
-            
-            // 加载新主题配置
+
             $configFile = __TYPECHO_ROOT_DIR__ . __TYPECHO_THEME_DIR__ . '/' . $themeName . '/functions.php';
-            if (file_exists($configFile)) {
+            if (is_file($configFile)) {
                 require_once $configFile;
                 if (function_exists('themeConfig')) {
                     $form = new Form();
                     themeConfig($form);
                     $config = $form->getValues();
-                    if ($config) {
+                    if (is_array($config) && !empty($config)) {
                         $options->__set('theme:' . $themeName, serialize($config));
                         foreach ($config as $key => $value) {
                             $options->__set($key, $value);
@@ -163,62 +169,101 @@ class Plugin implements PluginInterface
             self::debug('Theme switched', [
                 'from' => $currentTheme,
                 'to' => $themeName,
-                'time' => date('Y-m-d H:i:s')
+                'source' => $themeSource,
+                'time' => date('Y-m-d H:i:s'),
             ]);
 
-            // 注册关闭时的回调，恢复原主题设置
-            register_shutdown_function(function() use ($options, $currentTheme, $currentConfig, $currentRowName) {
+            register_shutdown_function(function () use ($options, $currentTheme, $currentConfig, $currentRowName): void {
                 try {
                     $options->__set('theme', $currentTheme);
-                    if ($currentConfig) {
+                    if (!empty($currentConfig)) {
                         $options->__set($currentRowName, serialize($currentConfig));
                         foreach ($currentConfig as $key => $value) {
                             $options->__set($key, $value);
                         }
                     }
-                    self::debug('Theme restored', [
-                        'theme' => $currentTheme,
-                        'time' => date('Y-m-d H:i:s')
-                    ]);
                 } catch (\Exception $e) {
                     self::log('error', 'Failed to restore theme: ' . $e->getMessage());
                 }
             });
-
         } catch (\Exception $e) {
             self::log('error', 'Error in processTheme: ' . $e->getMessage() . "\n" . $e->getTraceAsString());
         }
     }
 
-    /**
-     * 检查主题是否存在
-     */
-    private static function check($path)
+    private static function checkTheme($themeName)
     {
-        $dir = __TYPECHO_ROOT_DIR__ . __TYPECHO_THEME_DIR__ . '/' . $path;
-        self::debug('Checking theme directory', ['path' => $dir]);
-        
-        if (!is_dir($dir)) {
-            self::debug('Theme directory not found', ['path' => $dir]);
+        if (!preg_match('/^[A-Za-z0-9_-]+$/', $themeName)) {
+            self::debug('Invalid theme name format', ['theme' => $themeName]);
             return false;
         }
-        
-        // 检查必需的主题文件
-        $requiredFiles = ['index.php'];
-        foreach ($requiredFiles as $file) {
-            if (!file_exists($dir . '/' . $file)) {
-                self::debug('Required theme file missing', ['file' => $file]);
-                return false;
-            }
+
+        $themeRoot = realpath(__TYPECHO_ROOT_DIR__ . __TYPECHO_THEME_DIR__);
+        if ($themeRoot === false) {
+            self::debug('Theme root not found');
+            return false;
         }
-        
-        self::debug('Theme directory exists and valid', ['path' => $dir]);
+
+        $themeDir = realpath($themeRoot . DIRECTORY_SEPARATOR . $themeName);
+        if ($themeDir === false || strpos($themeDir, $themeRoot) !== 0) {
+            self::debug('Theme directory not found', ['theme' => $themeName]);
+            return false;
+        }
+
+        if (!is_file($themeDir . DIRECTORY_SEPARATOR . 'index.php')) {
+            self::debug('Required theme file missing', [
+                'theme' => $themeName,
+                'file' => 'index.php',
+            ]);
+            return false;
+        }
+
         return true;
     }
 
-    /**
-     * 获取当前用户
-     */
+    private static function getPreviewThemeFromCookie()
+    {
+        if (empty($_COOKIE[self::PREVIEW_COOKIE])) {
+            return '';
+        }
+
+        return trim((string) $_COOKIE[self::PREVIEW_COOKIE]);
+    }
+
+    private static function setPreviewCookie($themeName)
+    {
+        $expiresAt = time() + self::PREVIEW_COOKIE_TTL;
+
+        if (PHP_VERSION_ID >= 70300) {
+            setcookie(self::PREVIEW_COOKIE, $themeName, [
+                'expires' => $expiresAt,
+                'path' => '/',
+                'httponly' => true,
+                'samesite' => 'Lax',
+            ]);
+        } else {
+            setcookie(self::PREVIEW_COOKIE, $themeName, $expiresAt, '/', '', false, true);
+        }
+
+        $_COOKIE[self::PREVIEW_COOKIE] = $themeName;
+    }
+
+    private static function clearPreviewCookie()
+    {
+        if (PHP_VERSION_ID >= 70300) {
+            setcookie(self::PREVIEW_COOKIE, '', [
+                'expires' => time() - 3600,
+                'path' => '/',
+                'httponly' => true,
+                'samesite' => 'Lax',
+            ]);
+        } else {
+            setcookie(self::PREVIEW_COOKIE, '', time() - 3600, '/', '', false, true);
+        }
+
+        unset($_COOKIE[self::PREVIEW_COOKIE]);
+    }
+
     private static function getCurrentUser()
     {
         try {
@@ -232,15 +277,13 @@ class Plugin implements PluginInterface
         }
     }
 
-    /**
-     * 记录调试信息
-     */
     private static function debug($message, array $context = [])
     {
         try {
             $options = Options::alloc();
-            $debugMode = isset($options->plugin('ThemeDemo')->debugMode['enable']);
-            
+            $pluginConfig = $options->plugin('ThemeDemo');
+            $debugMode = is_array($pluginConfig->debugMode) && isset($pluginConfig->debugMode['enable']);
+
             if ($debugMode) {
                 $contextStr = json_encode($context, JSON_UNESCAPED_UNICODE | JSON_PRETTY_PRINT);
                 self::log('debug', $message . "\nContext: " . $contextStr);
@@ -250,23 +293,21 @@ class Plugin implements PluginInterface
         }
     }
 
-    /**
-     * 记录日志
-     */
     private static function log($type, $message)
     {
         try {
-            $logDir = __TYPECHO_ROOT_DIR__ . __TYPECHO_PLUGIN_DIR__ .'/ThemeDemo/logs';
+            $logDir = __TYPECHO_ROOT_DIR__ . __TYPECHO_PLUGIN_DIR__ . '/ThemeDemo/logs';
             if (!is_dir($logDir)) {
                 mkdir($logDir, 0755, true);
             }
-            
+
             $logFile = $logDir . '/preview.log';
             $date = date('Y-m-d H:i:s');
             $logMessage = "[$date][$type] $message" . PHP_EOL;
-            file_put_contents($logFile, $logMessage, FILE_APPEND);
+            file_put_contents($logFile, $logMessage, FILE_APPEND | LOCK_EX);
         } catch (\Exception $e) {
             error_log('ThemeDemo plugin logging failed: ' . $e->getMessage());
         }
     }
 }
+
