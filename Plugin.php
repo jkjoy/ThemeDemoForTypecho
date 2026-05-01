@@ -17,14 +17,14 @@ if (!defined('__TYPECHO_ROOT_DIR__')) {
  *
  * @package ThemeDemo
  * @author jkjoy
- * @version 1.0.6
+ * @version 1.0.7
  * @link https://github.com/jkjoy/ThemeDemoForTypecho
  */
 class Plugin implements PluginInterface
 {
-    private const PREVIEW_COOKIE = 'themedemo_preview_theme';
-    private const PREVIEW_CLEAR_KEYWORD = 'clear';
-    private const PREVIEW_COOKIE_TTL = 2592000;
+    private static $previewCookie = 'themedemo_preview_theme';
+    private static $previewClearKeyword = 'clear';
+    private static $previewCookieTtl = 2592000;
 
     public static function activate()
     {
@@ -70,7 +70,7 @@ class Plugin implements PluginInterface
             $requestTheme = trim((string) $request->get('theme', ''));
             $themeSource = 'request';
 
-            if ($requestTheme === self::PREVIEW_CLEAR_KEYWORD) {
+            if ($requestTheme === self::$previewClearKeyword) {
                 self::clearPreviewCookie();
                 self::log('info', 'Preview theme cleared by ' . self::getCurrentUser());
                 return;
@@ -173,7 +173,7 @@ class Plugin implements PluginInterface
                 'time' => date('Y-m-d H:i:s'),
             ]);
 
-            register_shutdown_function(function () use ($options, $currentTheme, $currentConfig, $currentRowName): void {
+            register_shutdown_function(function () use ($options, $currentTheme, $currentConfig, $currentRowName) {
                 try {
                     $options->__set('theme', $currentTheme);
                     if (!empty($currentConfig)) {
@@ -223,45 +223,45 @@ class Plugin implements PluginInterface
 
     private static function getPreviewThemeFromCookie()
     {
-        if (empty($_COOKIE[self::PREVIEW_COOKIE])) {
+        if (empty($_COOKIE[self::$previewCookie])) {
             return '';
         }
 
-        return trim((string) $_COOKIE[self::PREVIEW_COOKIE]);
+        return trim((string) $_COOKIE[self::$previewCookie]);
     }
 
     private static function setPreviewCookie($themeName)
     {
-        $expiresAt = time() + self::PREVIEW_COOKIE_TTL;
+        $expiresAt = time() + self::$previewCookieTtl;
 
         if (PHP_VERSION_ID >= 70300) {
-            setcookie(self::PREVIEW_COOKIE, $themeName, [
+            setcookie(self::$previewCookie, $themeName, [
                 'expires' => $expiresAt,
                 'path' => '/',
                 'httponly' => true,
                 'samesite' => 'Lax',
             ]);
         } else {
-            setcookie(self::PREVIEW_COOKIE, $themeName, $expiresAt, '/', '', false, true);
+            setcookie(self::$previewCookie, $themeName, $expiresAt, '/', '', false, true);
         }
 
-        $_COOKIE[self::PREVIEW_COOKIE] = $themeName;
+        $_COOKIE[self::$previewCookie] = $themeName;
     }
 
     private static function clearPreviewCookie()
     {
         if (PHP_VERSION_ID >= 70300) {
-            setcookie(self::PREVIEW_COOKIE, '', [
+            setcookie(self::$previewCookie, '', [
                 'expires' => time() - 3600,
                 'path' => '/',
                 'httponly' => true,
                 'samesite' => 'Lax',
             ]);
         } else {
-            setcookie(self::PREVIEW_COOKIE, '', time() - 3600, '/', '', false, true);
+            setcookie(self::$previewCookie, '', time() - 3600, '/', '', false, true);
         }
 
-        unset($_COOKIE[self::PREVIEW_COOKIE]);
+        unset($_COOKIE[self::$previewCookie]);
     }
 
     private static function getCurrentUser()
@@ -310,4 +310,3 @@ class Plugin implements PluginInterface
         }
     }
 }
-
